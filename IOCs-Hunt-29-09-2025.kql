@@ -1,0 +1,63 @@
+// https://security.microsoft.com/intel-explorer/articles/c2170e24
+// Weekly OSINT Highlights, 29 September 2025
+let Lookback = 30d;
+// Load IOCs
+let WeeklyOSINT =
+    externaldata(Type:string, Value:string, Source:string)
+    [h'https://raw.githubusercontent.com/HB-CYBERSEC/IOCs/refs/heads/main/OSINT-IOCs-29-09-2025.csv'];
+// Split IOC sets (domains to lower for case-insensitive host matching)
+let IOCSHA256 = WeeklyOSINT | where Type == "hash_sha256" | project Value;
+let IOCSHA1   = WeeklyOSINT | where Type == "hash_sha1"   | project Value;
+let IOCMD5    = WeeklyOSINT | where Type == "hash_md5"    | project Value;
+let IOCDOMAIN = WeeklyOSINT | where Type == "domain"      | project Value = tolower(Value);
+let IOCURL    = WeeklyOSINT | where Type == "url"         | project Value;
+let IOCIP     = WeeklyOSINT | where Type == "ip"          | project Value;
+// Email: attachments
+let ScanEmailAttachments =
+EmailAttachmentInfo
+| where Timestamp > ago(Lookback)
+| where SHA256 has_any (IOCSHA256)
+| extend Source = "EmailAttachmentInfo",
+         NetworkMessageId      = column_ifexists("NetworkMessageId",""),
+         RecipientEmailAddress = column_ifexists("RecipientEmailAddress",""),
+         SenderFromAddress     = column_ifexists("SenderFromAddress","");
+// Email: URLs (domain or full URL)
+let ScanEmailURLs =
+EmailUrlInfo
+| where Timestamp > ago(Lookback)
+| extend UrlHostLower = tolower(coalesce(UrlDomain, tostring(parse_url(Url)["Host"])))
+| where UrlHostLower has_any (IOCDOMAIN) or Url has_any (IOCURL)
+| extend Source = "EmailUrlInfo",
+         NetworkMessageId      = column_ifexists("NetworkMessageId",""),
+         RecipientEmailAddress = column_ifexists("RecipientEmailAddress",""),
+         SenderFromAddress     = column_ifexists("SenderFromAddress","");
+// Endpoint: files 
+let ScanEndpointFiles =
+DeviceFileEvents
+| where Timestamp > ago(Lookback)
+| where ActionType == "FileCreated"
+| where MD5 has_any (IOCMD5)
+   or  SHA1 has_any (IOCSHA1)
+   or  SHA256 has_any (IOCSHA256)
+| extend Source = "DeviceFileEvents";
+// Endpoint: network (ConnectionSuccess) — IP or RemoteUrl contains domain
+let ScanEndpointNetwork1 =
+DeviceNetworkEvents
+| where Timestamp > ago(Lookback)
+| where ActionType == "ConnectionSuccess"
+| extend RemoteUrlLower = tolower(tostring(RemoteUrl))
+| where RemoteIP has_any (IOCIP) or RemoteUrlLower has_any (IOCDOMAIN)
+| extend Source = "DeviceNetworkEvents";
+// Endpoint: network (HttpConnectionInspected)
+let ScanEndpointNetwork2 =
+DeviceNetworkEvents
+| where Timestamp > ago(Lookback)
+| where ActionType == "HttpConnectionInspected"
+| extend HttpHostLower = tolower(coalesce(
+           tostring(todynamic(AdditionalFields)["host"]),
+           tostring(todynamic(AdditionalFields)["Host"])
+       ))
+| where isnotempty(HttpHostLower) and HttpHostLower has_any (IOCDOMAIN)
+| extend Source = "DeviceNetworkEvents";
+// Output
+union ScanEmailAttachments, ScanEmailURLs, ScanEndpointFiles, ScanEndpointNetwork1, ScanEndpointNetwork2
