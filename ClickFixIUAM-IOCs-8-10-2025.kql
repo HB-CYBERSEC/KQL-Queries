@@ -1,0 +1,66 @@
+// https://security.microsoft.com/intel-explorer/articles/22efe460
+// Researchers at Palo Alto Networks have identified a phishing kit named the IUAM ClickFix Generator, which automates the creation of phishing attacks using the ClickFix social engineering technique.
+let Lookback = 30d;
+// Load IOCs
+let WeeklyOSINT = materialize(
+    externaldata(Type:string, Value:string, Source:string)
+    [h'https://raw.githubusercontent.com/HB-CYBERSEC/IOCs/refs/heads/main/ClickfixIUAM-IOCs-8-10-2025.csv']
+    | project Type = tolower(trim(@' ', Type)), Value = trim(@' ', Value)
+);
+let OSINT_SHA256 = WeeklyOSINT | where Type == "hash_sha256" | project Value;
+let OSINT_SHA1   = WeeklyOSINT | where Type == "hash_sha1"   | project Value;
+let OSINT_MD5    = WeeklyOSINT | where Type == "hash_md5"    | project Value;
+let OSINT_URL    = WeeklyOSINT | where Type == "url"         | project Value;
+let OSINT_IP     = WeeklyOSINT | where Type == "ip"          | project Value;
+// domains normalized to lower for case-insensitive host matching
+let OSINT_DOMAIN = WeeklyOSINT | where Type == "domain" | project Domain = tolower(Value);
+// E-mail attachments + URL's
+let ScanEmailAttachments =
+EmailAttachmentInfo
+| where Timestamp > ago(Lookback)
+| where SHA256 in (OSINT_SHA256)
+| extend Source = "EmailAttachmentInfo",
+         NetworkMessageId = column_ifexists("NetworkMessageId",""),
+         RecipientEmailAddress = column_ifexists("RecipientEmailAddress",""),
+         SenderFromAddress = column_ifexists("SenderFromAddress","");
+let ScanEmailURLs =
+EmailUrlInfo
+| where Timestamp > ago(Lookback)
+| extend UrlHost = tolower(coalesce(UrlDomain, tostring(parse_url(Url)["Host"])))
+| where UrlHost in (OSINT_DOMAIN) or Url in (OSINT_URL)
+| extend Source = "EmailUrlInfo",
+         NetworkMessageId = column_ifexists("NetworkMessageId",""),
+         RecipientEmailAddress = column_ifexists("RecipientEmailAddress",""),
+         SenderFromAddress = column_ifexists("SenderFromAddress","");
+// Endpoints: files + network 
+let ScanEndpointFiles =
+DeviceFileEvents
+| where Timestamp > ago(Lookback)
+| where ActionType in ("FileCreated", "FileRenamed", "FileModified")
+| where MD5  in (OSINT_MD5)
+   or SHA1  in (OSINT_SHA1)
+   or SHA256 in (OSINT_SHA256)
+| extend Source = "DeviceFileEvents";
+let ScanEndpointNetwork =
+DeviceNetworkEvents
+| where Timestamp > ago(Lookback)
+| where ActionType in ("ConnectionSuccess", "HttpConnectionInspected")
+| extend HostLower = tolower(coalesce(
+        tostring(todynamic(AdditionalFields)["host"]),
+        tostring(parse_url(RemoteUrl)["Host"]),
+        RemoteUrl))
+| where RemoteIP in (OSINT_IP) or (isnotempty(HostLower) and HostLower in (OSINT_DOMAIN))
+| extend Source = "DeviceNetworkEvents";
+// Output
+union isfuzzy=true
+    ScanEmailAttachments,
+    ScanEmailURLs,
+    ScanEndpointFiles,
+    ScanEndpointNetwork
+| extend IndicatorMatchType =
+    case(Source == "EmailAttachmentInfo", "SHA256",
+         Source == "DeviceFileEvents" and isnotempty(SHA256), "SHA256",
+         Source == "DeviceFileEvents" and isnotempty(SHA1),   "SHA1",
+         Source == "DeviceFileEvents" and isnotempty(MD5),    "MD5",
+         Source == "EmailUrlInfo" or Source == "DeviceNetworkEvents", "Domain/IP/URL",
+         "Unknown")
