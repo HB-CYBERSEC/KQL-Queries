@@ -1,4 +1,3 @@
-// https://security.microsoft.com/intel-explorer/articles/22efe460
 // Researchers at Palo Alto Networks have identified a phishing kit named the IUAM ClickFix Generator, which automates the creation of phishing attacks using the ClickFix social engineering technique.
 let Lookback = 30d;
 // Load IOCs
@@ -64,3 +63,4 @@ union isfuzzy=true
          Source == "DeviceFileEvents" and isnotempty(MD5),    "MD5",
          Source == "EmailUrlInfo" or Source == "DeviceNetworkEvents", "Domain/IP/URL",
          "Unknown")
+
